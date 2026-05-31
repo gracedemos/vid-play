@@ -1,9 +1,17 @@
+#include <SDL3/SDL_audio.h>
+#include <SDL3/SDL_init.h>
+#include <SDL3/SDL_render.h>
+#include <SDL3/SDL_video.h>
+#include <bits/time.h>
+#include <libavcodec/packet.h>
 #include <libavutil/avutil.h>
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <SDL3/SDL.h>
+#include <libavutil/frame.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <time.h>
 
 static SDL_Window* window = NULL;
 static SDL_Renderer* renderer = NULL;
@@ -32,6 +40,24 @@ static int init_sdl(int width, int height)
         return -1;
 
     return 0;
+}
+
+static void decode_delay(struct timespec start_time_tspec, int64_t pts_ns)
+{
+    struct timespec current_time_tspec;
+    clock_gettime(CLOCK_MONOTONIC, &current_time_tspec);
+    int64_t current_time = current_time_tspec.tv_sec * 1000000000 + current_time_tspec.tv_nsec;
+    int64_t start_time = start_time_tspec.tv_sec * 1000000000 + start_time_tspec.tv_nsec;
+    int64_t target_time = start_time + pts_ns;
+    if (target_time > current_time)
+    {
+        int64_t delay = target_time - current_time;
+        struct timespec delay_tspec = {
+            .tv_sec = delay / 1000000000,
+            .tv_nsec = delay % 1000000000
+        };
+        nanosleep(&delay_tspec, NULL);
+    }
 }
 
 int main(int argc, char** argv)
@@ -112,6 +138,10 @@ int main(int argc, char** argv)
     AVPacket* packet = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
     int quit = 0;
+    int64_t tb_num = video->time_base.num;
+    int64_t tb_den = video->time_base.den;
+    struct timespec start_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
     SDL_ResumeAudioStreamDevice(sdl_audio);
     while (!quit)
     {
@@ -130,6 +160,8 @@ int main(int argc, char** argv)
                 {
                     while (avcodec_receive_frame(video_codec_ctx, frame) == 0)
                     {
+                        int64_t pts_ns = (frame->pts * tb_num * 1000000000) / tb_den;
+                        decode_delay(start_time, pts_ns);
                         SDL_UpdateYUVTexture(texture, NULL,
                             frame->data[0],
                             frame->linesize[0],
@@ -137,6 +169,7 @@ int main(int argc, char** argv)
                             frame->linesize[1],
                             frame->data[2],
                             frame->linesize[2]);
+                        av_frame_unref(frame);
                     }
                 }
             }
@@ -155,6 +188,7 @@ int main(int argc, char** argv)
                         }
                         SDL_PutAudioStreamData(sdl_audio, interleave_buf, data_size);
                         av_freep(&interleave_buf);
+                        av_frame_unref(frame);
                     }
                 }
             }
@@ -166,5 +200,15 @@ int main(int argc, char** argv)
         SDL_RenderPresent(renderer);
     }
 
+    av_frame_free(&frame);
+    av_packet_free(&packet);
+    avcodec_free_context(&audio_codec_ctx);
+    avcodec_free_context(&video_codec_ctx);
+    avformat_close_input(&fmt_ctx);
+    SDL_DestroyAudioStream(sdl_audio);
+    SDL_DestroyTexture(texture);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
     return 0;
 }
